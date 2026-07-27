@@ -32,8 +32,8 @@ const getBatteryData = async () => {
         return {
             level: b.level * 100,
             charging: b.charging,
-            chargingTime: b.chargingTime,
-            dischargingTime: b.dischargingTime
+            chargingTime: b.chargingTime === Infinity ? "Infinity" : b.chargingTime,
+            dischargingTime: b.dischargingTime === Infinity ? "Infinity" : b.dischargingTime
         };
     } catch {
         return { level: "Error", charging: "Error", chargingTime: "Error", dischargingTime: "Error" };
