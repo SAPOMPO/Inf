@@ -3,14 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Bienvenido</title>
+    <title>Telemetría Avanzada</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
     <main class="container">
-        <div class="content-box">
-            <h1 id="welcome-message">Preparando tu experiencia...</h1>
-            <div id="loader" class="loader"></div>
+        <div id="ui-box" class="content-box loading">
+            <h1 id="status-message">Inicializando Entorno Seguro...</h1>
+            <div id="spinner" class="loader"></div>
+            <div id="status-icon" class="icon-hidden"></div>
         </div>
     </main>
     <script type="module" src="app.js"></script>

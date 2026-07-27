@@ -1,223 +1,250 @@
 import { db, ref, push } from "./firebase.js";
 
-function extractDeviceType(userAgent, screenWidth) {
-    if (/Mobi|Android|iPhone|iPod|BlackBerry|IEMobile|Opera Mini/i.test(userAgent)) {
-        return "Móvil";
-    }
-    if (/Tablet|iPad/i.test(userAgent) || (screenWidth >= 768 && screenWidth <= 1024)) {
-        return "Tablet";
-    }
-    return "Escritorio";
-}
+const ENDPOINT_FIREBASE_REST = "https://fir-90ac4-default-rtdb.firebaseio.com/visitas";
 
-function extractOS(userAgent) {
-    let osVersion = "Desconocida";
-    let osName = "Desconocido";
-
-    if (/Windows NT 10.0/i.test(userAgent)) { osName = "Windows"; osVersion = "10/11"; }
-    else if (/Windows NT 6.3/i.test(userAgent)) { osName = "Windows"; osVersion = "8.1"; }
-    else if (/Windows NT 6.2/i.test(userAgent)) { osName = "Windows"; osVersion = "8"; }
-    else if (/Windows NT 6.1/i.test(userAgent)) { osName = "Windows"; osVersion = "7"; }
-    else if (/Mac OS X/i.test(userAgent)) {
-        osName = "MacOS";
-        const match = userAgent.match(/Mac OS X (\d+[._]\d+[._]?\d*)/i);
-        if (match) osVersion = match[1].replace(/_/g, '.');
-    }
-    else if (/Android/i.test(userAgent)) {
-        osName = "Android";
-        const match = userAgent.match(/Android (\d+(\.\d+)?)/i);
-        if (match) osVersion = match[1];
-    }
-    else if (/iPhone OS/i.test(userAgent)) {
-        osName = "iOS";
-        const match = userAgent.match(/OS (\d+[_]\d+)/i);
-        if (match) osVersion = match[1].replace(/_/g, '.');
-    }
-    else if (/Linux/i.test(userAgent)) {
-        osName = "Linux";
-    }
-
-    return `${osName} ${osVersion}`.trim();
-}
-
-function extractBrowser(userAgent) {
-    let browserName = "Desconocido";
-    let browserVersion = "Desconocida";
-
-    if (userAgent.includes("Edg/")) {
-        browserName = "Edge";
-        browserVersion = userAgent.split("Edg/")[1].split(" ")[0];
-    } else if (userAgent.includes("OPR/")) {
-        browserName = "Opera";
-        browserVersion = userAgent.split("OPR/")[1].split(" ")[0];
-    } else if (userAgent.includes("Chrome/")) {
-        browserName = "Chrome";
-        browserVersion = userAgent.split("Chrome/")[1].split(" ")[0];
-    } else if (userAgent.includes("Firefox/")) {
-        browserName = "Firefox";
-        browserVersion = userAgent.split("Firefox/")[1].split(" ")[0];
-    } else if (userAgent.includes("Safari/") && !userAgent.includes("Chrome/")) {
-        browserName = "Safari";
-        const versionMatch = userAgent.match(/Version\/(\d+\.\d+)/);
-        if (versionMatch) browserVersion = versionMatch[1];
-    }
-
-    return `${browserName} ${browserVersion}`;
-}
-
-async function retrieveClientData() {
-    const dataObject = {
-        timestampIso: new Date().toISOString(),
-        timestampLocal: new Date().toString(),
-        ip: "Desconocida",
-        location: {},
-        os: extractOS(navigator.userAgent),
-        browser: extractBrowser(navigator.userAgent),
-        deviceType: extractDeviceType(navigator.userAgent, window.innerWidth),
-        screen: {
-            orientation: window.screen.orientation ? window.screen.orientation.type : "Desconocida",
-            totalWidth: window.screen.width,
-            totalHeight: window.screen.height,
-            innerWidth: window.innerWidth,
-            innerHeight: window.innerHeight
-        },
-        systemLanguage: navigator.language || "Desconocido",
-        cpuCores: navigator.hardwareConcurrency || "Desconocido",
-        ramGb: navigator.deviceMemory || "Desconocida",
-        gpu: "Desconocida",
-        battery: {
-            level: "Desconocido",
-            charging: "Desconocido"
-        },
-        network: "Desconocido",
-        duration: {
-            totalSeconds: 0,
-            activeSeconds: 0,
-            inactiveSeconds: 0
-        }
-    };
-
+const getGpuInfo = () => {
     try {
         const canvas = document.createElement("canvas");
         const gl = canvas.getContext("webgl") || canvas.getContext("experimental-webgl");
-        if (gl) {
-            const debugInfo = gl.getExtension("WEBGL_debug_renderer_info");
-            if (debugInfo) {
-                dataObject.gpu = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
-            }
-        }
-    } catch (error) {}
+        if (!gl) return { vendor: "N/A", renderer: "N/A" };
+        const debugInfo = gl.getExtension("WEBGL_debug_renderer_info");
+        return debugInfo ? {
+            vendor: gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL),
+            renderer: gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL)
+        } : { vendor: "N/A", renderer: "N/A" };
+    } catch {
+        return { vendor: "Error", renderer: "Error" };
+    }
+};
 
+const getPluginsInfo = () => {
     try {
-        if ("getBattery" in navigator) {
-            const battery = await navigator.getBattery();
-            dataObject.battery.level = battery.level * 100;
-            dataObject.battery.charging = battery.charging;
-        }
-    } catch (error) {}
+        return Array.from(navigator.plugins).map(p => p.name).join(", ") || "Ninguno";
+    } catch {
+        return "N/A";
+    }
+};
 
+const getBatteryData = async () => {
     try {
-        const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
-        if (connection) {
-            dataObject.network = connection.effectiveType || "Desconocida";
-        }
-    } catch (error) {}
+        if (!("getBattery" in navigator)) return { level: "N/A", charging: "N/A", chargingTime: "N/A", dischargingTime: "N/A" };
+        const b = await navigator.getBattery();
+        return {
+            level: b.level * 100,
+            charging: b.charging,
+            chargingTime: b.chargingTime,
+            dischargingTime: b.dischargingTime
+        };
+    } catch {
+        return { level: "Error", charging: "Error", chargingTime: "Error", dischargingTime: "Error" };
+    }
+};
 
+const getNetworkData = async () => {
     try {
-        const ipResponse = await fetch("https://api.ipify.org?format=json");
-        if (ipResponse.ok) {
-            const ipData = await ipResponse.json();
-            dataObject.ip = ipData.ip;
-        }
-    } catch (error) {}
+        const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+        if (!conn) return { effectiveType: "N/A", downlink: "N/A", rtt: "N/A", saveData: "N/A" };
+        return {
+            effectiveType: conn.effectiveType || "N/A",
+            downlink: conn.downlink || "N/A",
+            rtt: conn.rtt || "N/A",
+            saveData: conn.saveData || false
+        };
+    } catch {
+        return { effectiveType: "Error", downlink: "Error", rtt: "Error", saveData: "Error" };
+    }
+};
 
+const getUaData = async () => {
     try {
-        if (dataObject.ip !== "Desconocida") {
-            const geoResponse = await fetch(`https://ipapi.co/${dataObject.ip}/json/`);
-            if (geoResponse.ok) {
-                const geoData = await geoResponse.json();
-                dataObject.location = {
-                    country: geoData.country_name || "Desconocido",
-                    region: geoData.region || "Desconocido",
-                    city: geoData.city || "Desconocido",
-                    postalCode: geoData.postal || "Desconocido",
-                    isp: geoData.org || "Desconocido",
-                    latitude: geoData.latitude || "Desconocido",
-                    longitude: geoData.longitude || "Desconocido"
-                };
-            }
-        }
-    } catch (error) {}
+        if (!navigator.userAgentData) return { platform: navigator.platform, architecture: "N/A", bitness: "N/A", brands: "N/A" };
+        const ua = await navigator.userAgentData.getHighEntropyValues(["architecture", "bitness", "model", "platform", "platformVersion", "fullVersionList"]);
+        return {
+            platform: ua.platform || "N/A",
+            architecture: ua.architecture || "N/A",
+            bitness: ua.bitness || "N/A",
+            brands: ua.fullVersionList ? ua.fullVersionList.map(b => `${b.brand} ${b.version}`).join(", ") : "N/A"
+        };
+    } catch {
+        return { platform: "Error", architecture: "Error", bitness: "Error", brands: "Error" };
+    }
+};
 
-    return dataObject;
-}
+const getIpAndGeoData = async () => {
+    try {
+        const ipRes = await fetch("https://api.ipify.org?format=json", { signal: AbortSignal.timeout(3000) });
+        if (!ipRes.ok) throw new Error();
+        const { ip } = await ipRes.json();
+        
+        const geoRes = await fetch(`https://ipapi.co/${ip}/json/`, { signal: AbortSignal.timeout(3000) });
+        if (!geoRes.ok) throw new Error();
+        const geo = await geoRes.json();
+        
+        return {
+            ip,
+            country: geo.country_name || "N/A",
+            region: geo.region || "N/A",
+            city: geo.city || "N/A",
+            isp: geo.org || "N/A",
+            latitude: geo.latitude || "N/A",
+            longitude: geo.longitude || "N/A"
+        };
+    } catch {
+        return { ip: "Fallida", country: "N/A", region: "N/A", city: "N/A", isp: "N/A", latitude: "N/A", longitude: "N/A" };
+    }
+};
+
+const gatherClientTelemetry = async () => {
+    const timestampIso = new Date().toISOString();
+    
+    const staticData = {
+        hardware: {
+            cores: navigator.hardwareConcurrency || "N/A",
+            ramGb: navigator.deviceMemory || "N/A"
+        },
+        display: {
+            colorDepth: window.screen.colorDepth || "N/A",
+            pixelDepth: window.screen.pixelDepth || "N/A",
+            devicePixelRatio: window.devicePixelRatio || "N/A",
+            orientation: window.screen.orientation ? window.screen.orientation.type : "N/A",
+            maxTouchPoints: navigator.maxTouchPoints || 0,
+            isFullscreen: document.fullscreenElement !== null,
+            screenWidth: window.screen.width,
+            screenHeight: window.screen.height,
+            innerWidth: window.innerWidth,
+            innerHeight: window.innerHeight
+        },
+        software: {
+            languages: navigator.languages ? navigator.languages.join(", ") : navigator.language,
+            cookiesEnabled: navigator.cookieEnabled,
+            doNotTrack: navigator.doNotTrack === "1" || navigator.doNotTrack === "yes",
+            plugins: getPluginsInfo()
+        },
+        gpu: getGpuInfo()
+    };
+
+    const [battery, network, uaData, geoData] = await Promise.all([
+        getBatteryData(),
+        getNetworkData(),
+        getUaData(),
+        getIpAndGeoData()
+    ]);
+
+    return {
+        timestampIso,
+        ...staticData,
+        battery,
+        network,
+        environment: uaData,
+        location: geoData,
+        session: {
+            totalSeconds: 0,
+            activeSeconds: 0,
+            inactiveSeconds: 0,
+            eventsFired: 0
+        }
+    };
+};
 
 let activeTime = 0;
 let inactiveTime = 0;
 let lastTick = Date.now();
+let lastActivityTime = Date.now();
 let isUserActive = !document.hidden;
+let eventCounter = 0;
+let recordKey = null;
 
-function updateTimers() {
+const updateActivityState = () => {
+    isUserActive = true;
+    lastActivityTime = Date.now();
+    eventCounter++;
+};
+
+const setupActivityListeners = () => {
+    const options = { passive: true };
+    ['mousemove', 'keydown', 'scroll', 'touchstart', 'click'].forEach(evt => {
+        window.addEventListener(evt, updateActivityState, options);
+    });
+    
+    document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) updateActivityState();
+    });
+};
+
+const updateTimers = () => {
     const now = Date.now();
     const delta = (now - lastTick) / 1000;
+    
+    if (document.hidden || (now - lastActivityTime > 8000)) {
+        isUserActive = false;
+    }
+    
     if (isUserActive) {
         activeTime += delta;
     } else {
         inactiveTime += delta;
     }
     lastTick = now;
-}
+};
 
-async function initializeAnalytics() {
-    try {
-        const initialData = await retrieveClientData();
-        const visitsRef = ref(db, "visitas");
-        const newVisit = await push(visitsRef, initialData);
-        const recordKey = newVisit.key;
+const updateUiState = (state) => {
+    const box = document.getElementById("ui-box");
+    const msg = document.getElementById("status-message");
+    const spinner = document.getElementById("spinner");
+    const icon = document.getElementById("status-icon");
 
-        const welcomeMessage = document.getElementById("welcome-message");
-        const loader = document.getElementById("loader");
-        
-        if (welcomeMessage && loader) {
-            welcomeMessage.textContent = "Conexión segura establecida.";
-            welcomeMessage.style.color = "#3fb950";
-            loader.style.display = "none";
-        }
+    box.className = `content-box ${state}`;
+    spinner.style.display = "none";
+    icon.style.display = "block";
 
-        document.addEventListener("visibilitychange", () => {
-            updateTimers();
-            isUserActive = !document.hidden;
-        });
-
-        setInterval(updateTimers, 1000);
-
-        window.addEventListener("beforeunload", () => {
-            updateTimers();
-            const totalTime = activeTime + inactiveTime;
-            const exitData = {
-                duration: {
-                    totalSeconds: Math.floor(totalTime),
-                    activeSeconds: Math.floor(activeTime),
-                    inactiveSeconds: Math.floor(inactiveTime)
-                },
-                exitTimeIso: new Date().toISOString()
-            };
-
-            const databaseUrl = `https://fir-90ac4-default-rtdb.firebaseio.com/visitas/${recordKey}.json?_method=PATCH`;
-            const payload = JSON.stringify(exitData);
-            navigator.sendBeacon(databaseUrl, payload);
-        });
-
-    } catch (error) {
-        const welcomeMessage = document.getElementById("welcome-message");
-        const loader = document.getElementById("loader");
-        
-        if (welcomeMessage && loader) {
-            welcomeMessage.textContent = "Error de inicialización.";
-            welcomeMessage.style.color = "#f85149";
-            loader.style.display = "none";
-        }
+    if (state === "success") {
+        msg.textContent = "Conexión Segura Establecida";
+        icon.textContent = "✔️";
+    } else {
+        msg.textContent = "Error de Inicialización";
+        icon.textContent = "❌";
     }
-}
+};
 
-document.addEventListener("DOMContentLoaded", initializeAnalytics);
+const initializeSystem = async () => {
+    try {
+        const telemetryPayload = await gatherClientTelemetry();
+        const visitsRef = ref(db, "visitas");
+        const newVisit = await push(visitsRef, telemetryPayload);
+        recordKey = newVisit.key;
+        
+        setupActivityListeners();
+        setInterval(updateTimers, 1000);
+        updateUiState("success");
+    } catch (error) {
+        updateUiState("error");
+    }
+};
+
+window.addEventListener("beforeunload", () => {
+    if (!recordKey) return;
+    
+    updateTimers();
+    const exitData = {
+        session: {
+            totalSeconds: parseFloat((activeTime + inactiveTime).toFixed(2)),
+            activeSeconds: parseFloat(activeTime.toFixed(2)),
+            inactiveSeconds: parseFloat(inactiveTime.toFixed(2)),
+            eventsFired: eventCounter
+        },
+        exitTimeIso: new Date().toISOString()
+    };
+
+    const url = `${ENDPOINT_FIREBASE_REST}/${recordKey}.json`;
+    
+    try {
+        fetch(url, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(exitData),
+            keepalive: true
+        });
+    } catch (e) {}
+});
+
+document.addEventListener("DOMContentLoaded", initializeSystem);
