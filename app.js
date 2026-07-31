@@ -1,6 +1,80 @@
-import { db, ref, push } from "./firebase.js";
+import { db, doc, collection, writeBatch, onSnapshot, query, where, orderBy, limit, getDocs } from "./firebase.js";
 
-const ENDPOINT_FIREBASE_REST = "https://fir-90ac4-default-rtdb.firebaseio.com/visitas";
+class TelemetryNetworkError extends Error {
+    constructor(message, statusCode) {
+        super(message);
+        this.name = "TelemetryNetworkError";
+        this.statusCode = statusCode;
+        this.timestamp = new Date().toISOString();
+    }
+}
+
+class TelemetryApiError extends Error {
+    constructor(message, endpoint) {
+        super(message);
+        this.name = "TelemetryApiError";
+        this.endpoint = endpoint;
+        this.timestamp = new Date().toISOString();
+    }
+}
+
+class TelemetryTimeoutError extends Error {
+    constructor(message, timeoutDuration) {
+        super(message);
+        this.name = "TelemetryTimeoutError";
+        this.timeoutDuration = timeoutDuration;
+        this.timestamp = new Date().toISOString();
+    }
+}
+
+class FirestoreWriteError extends Error {
+    constructor(message, errorCode) {
+        super(message);
+        this.name = "FirestoreWriteError";
+        this.errorCode = errorCode;
+        this.timestamp = new Date().toISOString();
+    }
+}
+
+const FIRESTORE_PROJECT_ID = "fir-90ac4";
+const ENDPOINT_FIRESTORE_REST = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/(default)/documents/visitas_avanzadas`;
+
+const fetchWithExponentialBackoff = async (url, options = {}, maxRetries = 5, baseDelayMs = 1000) => {
+    let currentRetry = 0;
+    while (currentRetry < maxRetries) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs || 5000);
+        try {
+            const fetchOptions = { ...options, signal: controller.signal };
+            delete fetchOptions.timeoutMs;
+            const response = await fetch(url, fetchOptions);
+            clearTimeout(timeoutId);
+            
+            if (response.ok) {
+                return await response.json();
+            }
+            if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+                throw new TelemetryNetworkError("Client error encountered", response.status);
+            }
+            throw new TelemetryApiError("Server error or rate limit", url);
+        } catch (error) {
+            clearTimeout(timeoutId);
+            if (error.name === "AbortError") {
+                if (currentRetry === maxRetries - 1) {
+                    throw new TelemetryTimeoutError("Max retries reached due to timeout", options.timeoutMs || 5000);
+                }
+            } else if (error instanceof TelemetryNetworkError) {
+                throw error;
+            }
+            currentRetry++;
+            if (currentRetry >= maxRetries) {
+                throw error;
+            }
+            const delay = baseDelayMs * Math.pow(2, currentRetry) + Math.floor(Math.random() * 250);
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+    }
+};
 
 const getGpuInfo = () => {
     try {
@@ -72,24 +146,22 @@ const getUaData = async () => {
 
 const getIpAndGeoData = async () => {
     try {
-        const ipRes = await fetch("https://api.ipify.org?format=json", { signal: AbortSignal.timeout(3000) });
-        if (!ipRes.ok) throw new Error();
-        const { ip } = await ipRes.json();
+        const ipData = await fetchWithExponentialBackoff("https://api.ipify.org?format=json", { timeoutMs: 3500 }, 3, 600);
+        if (!ipData || !ipData.ip) throw new TelemetryApiError("Invalid IP response structure", "ipify");
         
-        const geoRes = await fetch(`https://ipapi.co/${ip}/json/`, { signal: AbortSignal.timeout(3000) });
-        if (!geoRes.ok) throw new Error();
-        const geo = await geoRes.json();
+        const geoData = await fetchWithExponentialBackoff(`https://ipapi.co/${ipData.ip}/json/`, { timeoutMs: 3500 }, 3, 600);
+        if (!geoData) throw new TelemetryApiError("Invalid Geo response structure", "ipapi");
         
         return {
-            ip,
-            country: geo.country_name || "N/A",
-            region: geo.region || "N/A",
-            city: geo.city || "N/A",
-            isp: geo.org || "N/A",
-            latitude: geo.latitude || "N/A",
-            longitude: geo.longitude || "N/A"
+            ip: ipData.ip,
+            country: geoData.country_name || "N/A",
+            region: geoData.region || "N/A",
+            city: geoData.city || "N/A",
+            isp: geoData.org || "N/A",
+            latitude: geoData.latitude || "N/A",
+            longitude: geoData.longitude || "N/A"
         };
-    } catch {
+    } catch (error) {
         return { ip: "Fallida", country: "N/A", region: "N/A", city: "N/A", isp: "N/A", latitude: "N/A", longitude: "N/A" };
     }
 };
@@ -198,44 +270,141 @@ const updateUiState = (state) => {
     icon.style.display = "block";
 
     if (state === "success") {
-        msg.textContent = "Conexión Segura Establecida";
+        msg.textContent = "Los datos se le enviara en un momento, por favor espere... (45-60 segundos)";
         icon.textContent = "✔️";
     } else {
-        msg.textContent = "Error de Inicialización";
+        msg.textContent = "Error de de busqueda de datos, por favor recarga la pagina de nuevo.";
         icon.textContent = "❌";
     }
 };
 
-const initializeSystem = async () => {
+const executeForceDisconnect = () => {
+    const overlay = document.createElement("div");
+    overlay.style.position = "fixed";
+    overlay.style.top = "0";
+    overlay.style.left = "0";
+    overlay.style.width = "100vw";
+    overlay.style.height = "100vh";
+    overlay.style.backgroundColor = "rgba(0, 0, 0, 0.95)";
+    overlay.style.zIndex = "9999";
+    overlay.style.display = "flex";
+    overlay.style.flexDirection = "column";
+    overlay.style.justifyContent = "center";
+    overlay.style.alignItems = "center";
+    overlay.style.color = "#ff4c4c";
+    overlay.style.fontFamily = "monospace";
+
+    const message = document.createElement("h1");
+    message.textContent = "CONEXIÓN TERMINADA POR EL ADMINISTRADOR";
+    message.style.fontSize = "2rem";
+    message.style.marginBottom = "20px";
+    message.style.textAlign = "center";
+
+    const subMessage = document.createElement("p");
+    subMessage.textContent = "Su sesión ha sido revocada remotamente.";
+    subMessage.style.fontSize = "1.2rem";
+
+    overlay.appendChild(message);
+    overlay.appendChild(subMessage);
+    document.body.appendChild(overlay);
+
+    window.removeEventListener("beforeunload", handleUnloadEvent);
+};
+
+const setupRealtimeListener = (docRef) => {
     try {
-        const telemetryPayload = await gatherClientTelemetry();
-        const visitsRef = ref(db, "visitas");
-        const newVisit = await push(visitsRef, telemetryPayload);
-        recordKey = newVisit.key;
-        
-        setupActivityListeners();
-        setInterval(updateTimers, 1000);
-        updateUiState("success");
+        onSnapshot(docRef, (snapshot) => {
+            if (snapshot.exists()) {
+                const data = snapshot.data();
+                if (data.force_disconnect === true) {
+                    executeForceDisconnect();
+                }
+            }
+        }, (error) => {
+            if (error.code === "permission-denied") {
+                updateUiState("error");
+            }
+        });
     } catch (error) {
         updateUiState("error");
     }
 };
 
-window.addEventListener("beforeunload", () => {
+const initializeSystem = async () => {
+    try {
+        if (!navigator.onLine) {
+            throw new TelemetryNetworkError("Client is offline during initialization", 0);
+        }
+
+        const telemetryPayload = await gatherClientTelemetry();
+        const mainCollectionRef = collection(db, "visitas_avanzadas");
+        const mainDocRef = doc(mainCollectionRef);
+        recordKey = mainDocRef.id;
+
+        const batch = writeBatch(db);
+
+        batch.set(mainDocRef, {
+            timestampIso: telemetryPayload.timestampIso,
+            userAgent: navigator.userAgent,
+            force_disconnect: false
+        });
+
+        const hardwareRef = doc(mainCollectionRef, recordKey, "metricas_hardware", "datos");
+        batch.set(hardwareRef, {
+            hardware: telemetryPayload.hardware,
+            display: telemetryPayload.display,
+            gpu: telemetryPayload.gpu
+        });
+
+        const networkRef = doc(mainCollectionRef, recordKey, "metricas_red", "datos");
+        batch.set(networkRef, {
+            battery: telemetryPayload.battery,
+            network: telemetryPayload.network,
+            location: telemetryPayload.location,
+            environment: telemetryPayload.environment
+        });
+
+        const sessionRef = doc(mainCollectionRef, recordKey, "sesion_tiempos", "datos");
+        batch.set(sessionRef, {
+            session: telemetryPayload.session,
+            software: telemetryPayload.software
+        });
+
+        await batch.commit();
+
+        setupActivityListeners();
+        setInterval(updateTimers, 1000);
+        updateUiState("success");
+        setupRealtimeListener(mainDocRef);
+    } catch (error) {
+        updateUiState("error");
+    }
+};
+
+const buildFirestoreRestPayload = (active, inactive, counter) => {
+    return {
+        fields: {
+            session: {
+                mapValue: {
+                    fields: {
+                        totalSeconds: { doubleValue: parseFloat((active + inactive).toFixed(2)) },
+                        activeSeconds: { doubleValue: parseFloat(active.toFixed(2)) },
+                        inactiveSeconds: { doubleValue: parseFloat(inactive.toFixed(2)) },
+                        eventsFired: { integerValue: counter }
+                    }
+                }
+            },
+            exitTimeIso: { stringValue: new Date().toISOString() }
+        }
+    };
+};
+
+const handleUnloadEvent = () => {
     if (!recordKey) return;
     
     updateTimers();
-    const exitData = {
-        session: {
-            totalSeconds: parseFloat((activeTime + inactiveTime).toFixed(2)),
-            activeSeconds: parseFloat(activeTime.toFixed(2)),
-            inactiveSeconds: parseFloat(inactiveTime.toFixed(2)),
-            eventsFired: eventCounter
-        },
-        exitTimeIso: new Date().toISOString()
-    };
-
-    const url = `${ENDPOINT_FIREBASE_REST}/${recordKey}.json`;
+    const exitData = buildFirestoreRestPayload(activeTime, inactiveTime, eventCounter);
+    const url = `${ENDPOINT_FIRESTORE_REST}/${recordKey}/sesion_tiempos/datos?updateMask.fieldPaths=session&updateMask.fieldPaths=exitTimeIso`;
     
     try {
         fetch(url, {
@@ -244,7 +413,49 @@ window.addEventListener("beforeunload", () => {
             body: JSON.stringify(exitData),
             keepalive: true
         });
-    } catch (e) {}
-});
+    } catch (e) {
+        try {
+            navigator.sendBeacon(url, JSON.stringify(exitData));
+        } catch (innerError) {
+            recordKey = null;
+        }
+    }
+};
 
+window.addEventListener("beforeunload", handleUnloadEvent);
 document.addEventListener("DOMContentLoaded", initializeSystem);
+
+const runExampleQueriesForAdmin = async () => {
+    try {
+        const baseRef = collection(db, "visitas_avanzadas");
+
+        const q1 = query(baseRef, where("force_disconnect", "==", false), orderBy("timestampIso", "desc"), limit(10));
+        const snapshot1 = await getDocs(q1);
+        const activeUsers = [];
+        snapshot1.forEach(docSnap => activeUsers.push({ id: docSnap.id, ...docSnap.data() }));
+
+        const q2 = query(baseRef, where("userAgent", ">=", "Mozilla"), limit(5));
+        const snapshot2 = await getDocs(q2);
+        const mozillaUsers = [];
+        snapshot2.forEach(docSnap => mozillaUsers.push({ id: docSnap.id, ...docSnap.data() }));
+
+        const hardwareGroupRef = collection(db, "metricas_hardware");
+        const q3 = query(hardwareGroupRef, where("gpu.vendor", "==", "NVIDIA"), limit(20));
+        const snapshot3 = await getDocs(q3);
+        const nvidiaGpus = [];
+        snapshot3.forEach(docSnap => nvidiaGpus.push({ id: docSnap.id, ...docSnap.data() }));
+
+        const networkGroupRef = collection(db, "metricas_red");
+        const q4 = query(networkGroupRef, where("location.country", "==", "Colombia"), orderBy("network.downlink", "desc"), limit(15));
+        const snapshot4 = await getDocs(q4);
+        const colombiaUsers = [];
+        snapshot4.forEach(docSnap => colombiaUsers.push({ id: docSnap.id, ...docSnap.data() }));
+
+        return { activeUsers, mozillaUsers, nvidiaGpus, colombiaUsers };
+    } catch (error) {
+        if (error.code === "failed-precondition") {
+            return { indexRequired: true, message: error.message };
+        }
+        return { error: true, code: error.code };
+    }
+};

@@ -1,10 +1,22 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getDatabase, ref, push } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+import { 
+    getFirestore, 
+    enableIndexedDbPersistence, 
+    doc, 
+    collection, 
+    writeBatch, 
+    onSnapshot, 
+    query, 
+    where, 
+    orderBy, 
+    limit, 
+    getDocs, 
+    setDoc 
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const firebaseConfig = {
     apiKey: "AIzaSyD7gZc0nw1puTENxejNeSaB0d3Jllt01Ac",
     authDomain: "fir-90ac4.firebaseapp.com",
-    databaseURL: "https://fir-90ac4-default-rtdb.firebaseio.com",
     projectId: "fir-90ac4",
     storageBucket: "fir-90ac4.firebasestorage.app",
     messagingSenderId: "621219147598",
@@ -12,5 +24,28 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
-export const db = getDatabase(app);
-export { ref, push };
+const db = getFirestore(app);
+
+enableIndexedDbPersistence(db).catch((err) => {
+    if (err.code === 'failed-precondition') {
+        const warningState = { status: "Multiple tabs open", active: true };
+        window.sessionStorage.setItem("persistenceWarning", JSON.stringify(warningState));
+    } else if (err.code === 'unimplemented') {
+        const warningState = { status: "Not supported", active: true };
+        window.sessionStorage.setItem("persistenceWarning", JSON.stringify(warningState));
+    }
+});
+
+export { 
+    db, 
+    doc, 
+    collection, 
+    writeBatch, 
+    onSnapshot, 
+    query, 
+    where, 
+    orderBy, 
+    limit, 
+    getDocs, 
+    setDoc 
+};
