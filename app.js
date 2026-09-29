@@ -270,10 +270,10 @@ const updateUiState = (state) => {
     icon.style.display = "block";
 
     if (state === "success") {
-        msg.textContent = "Los datos se le enviara en un momento, por favor espere... (45-60 segundos)";
+        msg.textContent = "Bucado";
         icon.textContent = "✔️";
     } else {
-        msg.textContent = "Error de de busqueda de datos, por favor recarga la pagina de nuevo.";
+        msg.textContent = "No encontrado";
         icon.textContent = "❌";
     }
 };
